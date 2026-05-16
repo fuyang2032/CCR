@@ -1,0 +1,13 @@
+subject,sample_a,sample_b,rating
+S01,A,B,2
+S01,A,C,1
+S01,B,C,1
+S02,A,B,2
+S02,B,C,1
+S02,C,A,1
+S03,A,B,1
+S03,A,C,2
+S03,B,C,1
+S04,A,B,0
+S04,A,C,1
+S04,B,C,1
