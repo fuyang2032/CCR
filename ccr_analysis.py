@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
-"""
-CCR (Comparison Category Rating) subjective listening-test analysis.
+'''
+CCR subjective listening-test analysis.
 
-Default input format:
-    subject,sample_a,sample_b,rating
-    S01,A,B,2
+Input CSV:
+subject,sample_a,sample_b,rating
+S01,A,B,2
 
-`rating` is interpreted as the CCR score for sample_a compared with sample_b:
-positive means sample_a is better than sample_b; negative means worse.
-
-The script also supports:
-    --mode presentation: rating is second_sample compared with first_sample.
-    --mode p800: randomized P.800 order, recoded to processed compared with reference.
-
-Outputs:
-    - processing_report.md
-    - subject_reliability.csv
-    - circular_triads.csv
-    - pair_summary.csv
-    - sample_scores.csv
-    - cleaned_scores.csv
-"""
-
-from __future__ import annotations
+Positive rating means sample_a is better than sample_b.
+'''
 
 import argparse
 import csv
@@ -32,170 +17,127 @@ import os
 import statistics
 import sys
 from collections import defaultdict, deque
-from dataclasses import dataclass
 from statistics import NormalDist
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 CCR_LABELS = {
-    3: "Much Better",
-    2: "Better",
-    1: "Slightly Better",
-    0: "About the Same",
-    -1: "Slightly Worse",
-    -2: "Worse",
-    -3: "Much Worse",
+    3: 'Much Better',
+    2: 'Better',
+    1: 'Slightly Better',
+    0: 'About the Same',
+    -1: 'Slightly Worse',
+    -2: 'Worse',
+    -3: 'Much Worse',
 }
 
 
-@dataclass(frozen=True)
-class Observation:
-    subject: str
-    sample_a: str
-    sample_b: str
-    rating: float
-    raw_row: int
-
-
-@dataclass(frozen=True)
-class CanonicalObservation:
-    subject: str
-    left: str
-    right: str
-    score: float
-    raw_row: int
-
-
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(
-        description=(
-            "Process CCR listening-test ratings, detect circular triads, "
-            "exclude unreliable subjects, and report CMOS/pairwise conclusions."
-        )
+        description='Analyze CCR ratings, circular triads, CMOS, and sample ranking.'
     )
-    parser.add_argument("input_csv", help="Input CSV file.")
-    parser.add_argument(
-        "--out-dir",
-        default="ccr_output",
-        help="Directory for output CSV files and Markdown report.",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=("pairwise", "presentation", "p800"),
-        default="pairwise",
-        help=(
-            "pairwise: rating is sample_a compared with sample_b; "
-            "presentation: rating is second_sample compared with first_sample; "
-            "p800: recode randomized reference/processed presentation order."
-        ),
-    )
-    parser.add_argument("--subject-col", default="subject")
-    parser.add_argument("--sample-a-col", default="sample_a")
-    parser.add_argument("--sample-b-col", default="sample_b")
-    parser.add_argument("--first-col", default="first_sample")
-    parser.add_argument("--second-col", default="second_sample")
-    parser.add_argument("--reference-col", default="reference")
-    parser.add_argument("--processed-col", default="processed")
-    parser.add_argument("--rating-col", default="rating")
-    parser.add_argument(
-        "--min-abs-preference",
-        type=float,
-        default=1.0,
-        help=(
-            "Minimum absolute pair score counted as a decisive preference when "
-            "detecting circular triads. Default 1.0 ignores only CCR=0 ties."
-        ),
-    )
-    parser.add_argument(
-        "--cycle-rate-threshold",
-        type=float,
-        default=0.25,
-        help=(
-            "Subject is unreliable when circular_triads / testable_triads "
-            "is greater than this value. Used for incomplete or tied designs too."
-        ),
-    )
-    parser.add_argument(
-        "--zeta-threshold",
-        type=float,
-        default=0.75,
-        help=(
-            "For complete decisive pairwise designs, subject is unreliable when "
-            "Kendall consistency zeta is below this value."
-        ),
-    )
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=0.05,
-        help="Significance level for confidence intervals and Holm-adjusted sign tests.",
-    )
-    parser.add_argument(
-        "--keep-unreliable",
-        action="store_true",
-        help="Report unreliable subjects but keep their scores in the final summaries.",
-    )
+    parser.add_argument('input_csv', nargs='?', help='Input CSV file.')
+    parser.add_argument('--out-dir', default='ccr_output')
+    parser.add_argument('--mode', choices=['pairwise', 'presentation', 'p800'], default='pairwise')
+    parser.add_argument('--subject-col', default='subject')
+    parser.add_argument('--sample-a-col', default='sample_a')
+    parser.add_argument('--sample-b-col', default='sample_b')
+    parser.add_argument('--first-col', default='first_sample')
+    parser.add_argument('--second-col', default='second_sample')
+    parser.add_argument('--reference-col', default='reference')
+    parser.add_argument('--processed-col', default='processed')
+    parser.add_argument('--rating-col', default='rating')
+    parser.add_argument('--min-abs-preference', type=float, default=1.0)
+    parser.add_argument('--cycle-rate-threshold', type=float, default=0.25)
+    parser.add_argument('--zeta-threshold', type=float, default=0.75)
+    parser.add_argument('--alpha', type=float, default=0.05)
+    parser.add_argument('--keep-unreliable', action='store_true')
+    parser.add_argument('--max-samples', type=int, default=5)
+    parser.add_argument('--make-template', metavar='PATH')
+    parser.add_argument('--template-subjects', type=int, default=10)
+    parser.add_argument('--template-samples', default='A,B,C,D,E')
+    parser.add_argument('--template-fill', type=float, default=0.0)
     return parser.parse_args()
 
 
-def require_columns(fieldnames: Optional[Sequence[str]], required: Sequence[str]) -> None:
-    if not fieldnames:
-        raise ValueError("Input CSV has no header row.")
-    missing = [col for col in required if col not in fieldnames]
-    if missing:
-        raise ValueError(f"Missing required column(s): {', '.join(missing)}")
+def parse_sample_names(raw):
+    samples = [part.strip() for part in raw.split(',') if part.strip()]
+    if len(samples) < 2:
+        raise ValueError('Template needs at least 2 sample names.')
+    if len(samples) > 5:
+        raise ValueError('Template supports at most 5 sample names.')
+    if len(samples) != len(set(samples)):
+        raise ValueError('Template sample names must be unique.')
+    return samples
 
 
-def parse_rating(value: str, row_number: int) -> float:
+def create_template(path, subject_count, samples, fill):
+    if subject_count < 1:
+        raise ValueError('--template-subjects must be at least 1.')
+    if fill < -3 or fill > 3:
+        raise ValueError('--template-fill must be in [-3, 3].')
+    folder = os.path.dirname(os.path.abspath(path))
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    rating = str(int(fill)) if float(fill).is_integer() else str(fill)
+    with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(['subject', 'sample_a', 'sample_b', 'rating'])
+        pairs = list(itertools.combinations(samples, 2))
+        for subject_index in range(1, subject_count + 1):
+            subject = f'S{subject_index:02d}'
+            for sample_a, sample_b in pairs:
+                writer.writerow([subject, sample_a, sample_b, rating])
+
+
+def clean_cell(value, row_number, column):
+    if value is None or not value.strip():
+        raise ValueError(f'Row {row_number}: empty value in column {column}.')
+    return value.strip()
+
+
+def parse_rating(value, row_number):
     try:
         rating = float(value)
     except ValueError as exc:
-        raise ValueError(f"Row {row_number}: rating is not numeric: {value!r}") from exc
+        raise ValueError(f'Row {row_number}: rating is not numeric: {value!r}') from exc
     if rating < -3 or rating > 3:
-        raise ValueError(f"Row {row_number}: CCR rating must be in [-3, 3], got {rating}")
+        raise ValueError(f'Row {row_number}: CCR rating must be in [-3, 3], got {rating}.')
     return rating
 
 
-def read_observations(args: argparse.Namespace) -> List[Observation]:
-    observations: List[Observation] = []
-    with open(args.input_csv, newline="", encoding="utf-8-sig") as f:
+def require_columns(fieldnames, required):
+    if not fieldnames:
+        raise ValueError('Input CSV has no header row.')
+    missing = [column for column in required if column not in fieldnames]
+    if missing:
+        missing_text = ', '.join(missing)
+        raise ValueError(f'Missing required column(s): {missing_text}')
+
+
+def read_observations(args):
+    rows = []
+    with open(args.input_csv, newline='', encoding='utf-8-sig') as f:
         sample = f.read(4096)
         f.seek(0)
         dialect = csv.Sniffer().sniff(sample) if sample.strip() else csv.excel
         reader = csv.DictReader(f, dialect=dialect)
-
-        if args.mode == "pairwise":
-            require_columns(
-                reader.fieldnames,
-                [args.subject_col, args.sample_a_col, args.sample_b_col, args.rating_col],
-            )
-        elif args.mode == "presentation":
-            require_columns(
-                reader.fieldnames,
-                [args.subject_col, args.first_col, args.second_col, args.rating_col],
-            )
+        if args.mode == 'pairwise':
+            require_columns(reader.fieldnames, [args.subject_col, args.sample_a_col, args.sample_b_col, args.rating_col])
+        elif args.mode == 'presentation':
+            require_columns(reader.fieldnames, [args.subject_col, args.first_col, args.second_col, args.rating_col])
         else:
             require_columns(
                 reader.fieldnames,
-                [
-                    args.subject_col,
-                    args.first_col,
-                    args.second_col,
-                    args.reference_col,
-                    args.processed_col,
-                    args.rating_col,
-                ],
+                [args.subject_col, args.first_col, args.second_col, args.reference_col, args.processed_col, args.rating_col],
             )
-
         for row_number, row in enumerate(reader, start=2):
             subject = clean_cell(row.get(args.subject_col), row_number, args.subject_col)
-            rating = parse_rating(row.get(args.rating_col, ""), row_number)
-
-            if args.mode == "pairwise":
+            rating = parse_rating(row.get(args.rating_col, ''), row_number)
+            if args.mode == 'pairwise':
                 sample_a = clean_cell(row.get(args.sample_a_col), row_number, args.sample_a_col)
                 sample_b = clean_cell(row.get(args.sample_b_col), row_number, args.sample_b_col)
                 score = rating
-            elif args.mode == "presentation":
+            elif args.mode == 'presentation':
                 first = clean_cell(row.get(args.first_col), row_number, args.first_col)
                 second = clean_cell(row.get(args.second_col), row_number, args.second_col)
                 sample_a = second
@@ -206,64 +148,54 @@ def read_observations(args: argparse.Namespace) -> List[Observation]:
                 second = clean_cell(row.get(args.second_col), row_number, args.second_col)
                 reference = clean_cell(row.get(args.reference_col), row_number, args.reference_col)
                 processed = clean_cell(row.get(args.processed_col), row_number, args.processed_col)
-
                 if first == reference and second == processed:
                     score = rating
                 elif first == processed and second == reference:
                     score = -rating
                 else:
-                    raise ValueError(
-                        "Row "
-                        f"{row_number}: first/second samples do not match reference/processed "
-                        f"columns ({first!r}, {second!r}, {reference!r}, {processed!r})"
-                    )
+                    raise ValueError(f'Row {row_number}: first/second samples do not match reference/processed columns.')
                 sample_a = processed
                 sample_b = reference
-
             if sample_a == sample_b:
-                raise ValueError(f"Row {row_number}: sample_a and sample_b are identical.")
-            observations.append(Observation(subject, sample_a, sample_b, score, row_number))
-    if not observations:
-        raise ValueError("Input CSV contains no data rows.")
-    return observations
+                raise ValueError(f'Row {row_number}: sample_a and sample_b are identical.')
+            rows.append((subject, sample_a, sample_b, score, row_number))
+    if not rows:
+        raise ValueError('Input CSV contains no data rows.')
+    validate_sample_count(rows, args.max_samples)
+    return rows
 
 
-def clean_cell(value: Optional[str], row_number: int, column: str) -> str:
-    if value is None:
-        raise ValueError(f"Row {row_number}: missing value in column {column!r}")
-    cleaned = value.strip()
-    if not cleaned:
-        raise ValueError(f"Row {row_number}: empty value in column {column!r}")
-    return cleaned
+def validate_sample_count(rows, max_samples):
+    if max_samples < 2:
+        raise ValueError('--max-samples must be at least 2.')
+    samples = sorted({row[1] for row in rows} | {row[2] for row in rows})
+    if len(samples) > max_samples:
+        sample_text = ', '.join(samples)
+        raise ValueError(f'Input contains {len(samples)} samples ({sample_text}), but --max-samples is {max_samples}.')
+    if len(samples) > 5:
+        raise ValueError('This CCR workflow supports at most 5 test samples.')
 
 
-def canonicalize(obs: Observation) -> CanonicalObservation:
-    if obs.sample_a <= obs.sample_b:
-        return CanonicalObservation(obs.subject, obs.sample_a, obs.sample_b, obs.rating, obs.raw_row)
-    return CanonicalObservation(obs.subject, obs.sample_b, obs.sample_a, -obs.rating, obs.raw_row)
+def canonicalize(row):
+    subject, sample_a, sample_b, score, row_number = row
+    if sample_a <= sample_b:
+        return (subject, sample_a, sample_b, score, row_number)
+    return (subject, sample_b, sample_a, -score, row_number)
 
 
-def mean(values: Sequence[float]) -> float:
-    return sum(values) / len(values) if values else float("nan")
+def average(values):
+    return sum(values) / len(values) if values else float('nan')
 
 
-def sample_sd(values: Sequence[float]) -> float:
-    if len(values) < 2:
-        return 0.0
-    return statistics.stdev(values)
+def stdev(values):
+    return statistics.stdev(values) if len(values) > 1 else 0.0
 
 
-def median(values: Sequence[float]) -> float:
-    return statistics.median(values) if values else float("nan")
+def comb(n, k):
+    return math.comb(n, k) if n >= k else 0
 
 
-def comb(n: int, k: int) -> int:
-    if n < k:
-        return 0
-    return math.comb(n, k)
-
-
-def kendall_tmax(n: int) -> int:
+def kendall_tmax(n):
     if n < 3:
         return 0
     if n % 2 == 0:
@@ -271,24 +203,17 @@ def kendall_tmax(n: int) -> int:
     return n * (n * n - 1) // 24
 
 
-def subject_pair_means(
-    canonical: Sequence[CanonicalObservation],
-) -> Dict[str, Dict[Tuple[str, str], float]]:
-    values: Dict[str, Dict[Tuple[str, str], List[float]]] = defaultdict(lambda: defaultdict(list))
-    for obs in canonical:
-        values[obs.subject][(obs.left, obs.right)].append(obs.score)
+def subject_pair_means(canonical):
+    values = defaultdict(lambda: defaultdict(list))
+    for subject, left, right, score, row_number in canonical:
+        values[subject][(left, right)].append(score)
     return {
-        subject: {pair: mean(scores) for pair, scores in pairs.items()}
+        subject: {pair: average(scores) for pair, scores in pairs.items()}
         for subject, pairs in values.items()
     }
 
 
-def pair_direction(
-    pair_scores: Dict[Tuple[str, str], float],
-    a: str,
-    b: str,
-    min_abs_preference: float,
-) -> Optional[int]:
+def pair_direction(pair_scores, a, b, min_abs_preference):
     if a <= b:
         score = pair_scores.get((a, b))
     else:
@@ -300,637 +225,460 @@ def pair_direction(
     return 1 if score > 0 else -1
 
 
-def is_circular_triad(d_ab: int, d_bc: int, d_ca: int) -> bool:
+def is_cycle(d_ab, d_bc, d_ca):
     return (d_ab > 0 and d_bc > 0 and d_ca > 0) or (d_ab < 0 and d_bc < 0 and d_ca < 0)
 
 
-def analyze_subject_reliability(
-    observations: Sequence[Observation],
-    canonical: Sequence[CanonicalObservation],
-    min_abs_preference: float,
-    cycle_rate_threshold: float,
-    zeta_threshold: float,
-) -> Tuple[List[dict], List[dict], set]:
-    all_samples = sorted({obs.sample_a for obs in observations} | {obs.sample_b for obs in observations})
-    pair_means = subject_pair_means(canonical)
-    by_subject_rows: List[dict] = []
-    circular_rows: List[dict] = []
-    unreliable_subjects = set()
+def relation(a, b, direction):
+    return f'{a}>{b}' if direction > 0 else f'{b}>{a}'
 
+
+def analyze_reliability(rows, canonical, min_abs_preference, cycle_rate_threshold, zeta_threshold):
+    pair_means = subject_pair_means(canonical)
+    reliability = []
+    circular = []
+    unreliable = set()
     for subject in sorted(pair_means):
         pair_scores = pair_means[subject]
-        subject_samples = sorted(set(itertools.chain.from_iterable(pair_scores.keys())))
-        n_samples = len(subject_samples)
-        possible_pairs = comb(n_samples, 2)
-        possible_triads = comb(n_samples, 3)
+        samples = sorted(set(itertools.chain.from_iterable(pair_scores.keys())))
+        possible_pairs = comb(len(samples), 2)
+        possible_triads = comb(len(samples), 3)
         decisive_pairs = sum(1 for score in pair_scores.values() if abs(score) >= min_abs_preference)
-
         testable_triads = 0
         circular_triads = 0
-        for a, b, c in itertools.combinations(subject_samples, 3):
+        for a, b, c in itertools.combinations(samples, 3):
             d_ab = pair_direction(pair_scores, a, b, min_abs_preference)
             d_bc = pair_direction(pair_scores, b, c, min_abs_preference)
             d_ca = pair_direction(pair_scores, c, a, min_abs_preference)
             if d_ab is None or d_bc is None or d_ca is None:
                 continue
             testable_triads += 1
-            if is_circular_triad(d_ab, d_bc, d_ca):
+            if is_cycle(d_ab, d_bc, d_ca):
                 circular_triads += 1
-                circular_rows.append(
-                    {
-                        "subject": subject,
-                        "sample_1": a,
-                        "sample_2": b,
-                        "sample_3": c,
-                        "relation_1": relation_text(a, b, d_ab),
-                        "relation_2": relation_text(b, c, d_bc),
-                        "relation_3": relation_text(c, a, d_ca),
-                    }
-                )
-
+                circular.append({
+                    'subject': subject,
+                    'sample_1': a,
+                    'sample_2': b,
+                    'sample_3': c,
+                    'relation_1': relation(a, b, d_ab),
+                    'relation_2': relation(b, c, d_bc),
+                    'relation_3': relation(c, a, d_ca),
+                })
         cycle_rate = circular_triads / testable_triads if testable_triads else 0.0
         complete_decisive = decisive_pairs == possible_pairs and possible_pairs > 0
-        tmax = kendall_tmax(n_samples)
+        tmax = kendall_tmax(len(samples))
         zeta = None
         if complete_decisive and tmax > 0:
-            zeta = 1.0 - (circular_triads / tmax)
-
-        unreliable = False
+            zeta = 1.0 - circular_triads / tmax
         reasons = []
         if testable_triads and cycle_rate > cycle_rate_threshold:
-            unreliable = True
-            reasons.append(f"cycle_rate>{cycle_rate_threshold:g}")
+            reasons.append(f'cycle_rate>{cycle_rate_threshold:g}')
         if zeta is not None and zeta < zeta_threshold:
-            unreliable = True
-            reasons.append(f"zeta<{zeta_threshold:g}")
-        if unreliable:
-            unreliable_subjects.add(subject)
-
-        by_subject_rows.append(
-            {
-                "subject": subject,
-                "n_samples_seen": n_samples,
-                "n_pairs_seen": len(pair_scores),
-                "possible_pairs": possible_pairs,
-                "decisive_pairs": decisive_pairs,
-                "possible_triads": possible_triads,
-                "testable_triads": testable_triads,
-                "circular_triads": circular_triads,
-                "cycle_rate": cycle_rate,
-                "kendall_tmax_complete": tmax,
-                "kendall_zeta_complete_decisive": zeta,
-                "reliable": not unreliable,
-                "rejection_reason": ";".join(reasons),
-            }
-        )
-
-    observed_subjects = {obs.subject for obs in observations}
-    missing_subjects = observed_subjects - set(pair_means)
-    for subject in sorted(missing_subjects):
-        by_subject_rows.append(
-            {
-                "subject": subject,
-                "n_samples_seen": 0,
-                "n_pairs_seen": 0,
-                "possible_pairs": 0,
-                "decisive_pairs": 0,
-                "possible_triads": 0,
-                "testable_triads": 0,
-                "circular_triads": 0,
-                "cycle_rate": 0.0,
-                "kendall_tmax_complete": 0,
-                "kendall_zeta_complete_decisive": None,
-                "reliable": True,
-                "rejection_reason": "",
-            }
-        )
-
-    _ = all_samples
-    return by_subject_rows, circular_rows, unreliable_subjects
+            reasons.append(f'zeta<{zeta_threshold:g}')
+        if reasons:
+            unreliable.add(subject)
+        reliability.append({
+            'subject': subject,
+            'n_samples_seen': len(samples),
+            'n_pairs_seen': len(pair_scores),
+            'possible_pairs': possible_pairs,
+            'decisive_pairs': decisive_pairs,
+            'possible_triads': possible_triads,
+            'testable_triads': testable_triads,
+            'circular_triads': circular_triads,
+            'cycle_rate': cycle_rate,
+            'kendall_tmax_complete': tmax,
+            'kendall_zeta_complete_decisive': zeta,
+            'reliable': not reasons,
+            'rejection_reason': ';'.join(reasons),
+        })
+    return reliability, circular, unreliable
 
 
-def relation_text(a: str, b: str, direction: int) -> str:
-    if direction > 0:
-        return f"{a}>{b}"
-    return f"{b}>{a}"
-
-
-def binomial_two_sided_p(k_success: int, n: int) -> Optional[float]:
+def sign_test_p(successes, n):
     if n <= 0:
         return None
-    k = min(k_success, n - k_success)
-    prob = sum(math.comb(n, i) for i in range(k + 1)) / (2**n)
-    return min(1.0, 2.0 * prob)
+    k = min(successes, n - successes)
+    p = sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n
+    return min(1.0, 2.0 * p)
 
 
-def holm_adjust(p_values: Sequence[Optional[float]]) -> List[Optional[float]]:
+def holm_adjust(p_values):
     indexed = [(i, p) for i, p in enumerate(p_values) if p is not None]
-    m = len(indexed)
-    adjusted: List[Optional[float]] = [None] * len(p_values)
-    prev = 0.0
-    for rank, (idx, p_value) in enumerate(sorted(indexed, key=lambda x: x[1]), start=1):
-        adj = min(1.0, (m - rank + 1) * p_value)
-        adj = max(prev, adj)
-        adjusted[idx] = adj
-        prev = adj
+    adjusted = [None] * len(p_values)
+    previous = 0.0
+    total = len(indexed)
+    for rank, item in enumerate(sorted(indexed, key=lambda x: x[1]), start=1):
+        index, p_value = item
+        value = min(1.0, (total - rank + 1) * p_value)
+        value = max(previous, value)
+        adjusted[index] = value
+        previous = value
     return adjusted
 
 
-def summarize_pairs(
-    canonical: Sequence[CanonicalObservation],
-    excluded_subjects: set,
-    keep_unreliable: bool,
-    alpha: float,
-) -> Tuple[List[dict], List[CanonicalObservation]]:
-    clean = [
-        obs
-        for obs in canonical
-        if keep_unreliable or obs.subject not in excluded_subjects
-    ]
-    grouped: Dict[Tuple[str, str], List[float]] = defaultdict(list)
-    for obs in clean:
-        grouped[(obs.left, obs.right)].append(obs.score)
+def pair_conclusion(row, alpha):
+    left = row['sample_left']
+    right = row['sample_right']
+    mean_value = row['mean_cmos_left_minus_right']
+    p_value = row['holm_p']
+    if row['n'] < 2:
+        return '样本量不足，仅作描述'
+    significant = p_value is not None and p_value < alpha
+    if mean_value > 0 and significant and row['ci_low'] > 0:
+        return f'{left} 显著优于 {right}'
+    if mean_value < 0 and significant and row['ci_high'] < 0:
+        return f'{right} 显著优于 {left}'
+    if mean_value > 0:
+        return f'{left} 平均更优，但统计证据不足或不完全一致'
+    if mean_value < 0:
+        return f'{right} 平均更优，但统计证据不足或不完全一致'
+    return '两样本平均无差异'
 
+
+def summarize_pairs(canonical, unreliable, keep_unreliable, alpha):
+    clean = [row for row in canonical if keep_unreliable or row[0] not in unreliable]
+    grouped = defaultdict(list)
+    for subject, left, right, score, row_number in clean:
+        grouped[(left, right)].append(score)
     z = NormalDist().inv_cdf(1.0 - alpha / 2.0)
-    rows: List[dict] = []
-    p_values: List[Optional[float]] = []
+    rows = []
+    p_values = []
     for left, right in sorted(grouped):
         scores = grouped[(left, right)]
-        n = len(scores)
-        avg = mean(scores)
-        sd = sample_sd(scores)
-        se = sd / math.sqrt(n) if n else float("nan")
-        ci_half = z * se if n > 1 else 0.0
-        pos = sum(1 for s in scores if s > 0)
-        neg = sum(1 for s in scores if s < 0)
-        ties = sum(1 for s in scores if s == 0)
-        decisive_n = pos + neg
-        p_sign = binomial_two_sided_p(pos, decisive_n)
-        p_values.append(p_sign)
+        count = len(scores)
+        mean_value = average(scores)
+        sd = stdev(scores)
+        se = sd / math.sqrt(count) if count else float('nan')
+        ci_half = z * se if count > 1 else 0.0
+        positive = sum(1 for score in scores if score > 0)
+        negative = sum(1 for score in scores if score < 0)
+        ties = sum(1 for score in scores if score == 0)
+        p_value = sign_test_p(positive, positive + negative)
+        p_values.append(p_value)
         row = {
-            "sample_left": left,
-            "sample_right": right,
-            "n": n,
-            "mean_cmos_left_minus_right": avg,
-            "median": median(scores),
-            "sd": sd,
-            "se": se,
-            "ci_low": avg - ci_half,
-            "ci_high": avg + ci_half,
-            "positive_votes": pos,
-            "negative_votes": neg,
-            "tie_votes": ties,
-            "sign_test_p": p_sign,
-            "holm_p": None,
-            "conclusion": "",
+            'sample_left': left,
+            'sample_right': right,
+            'n': count,
+            'mean_cmos_left_minus_right': mean_value,
+            'median': statistics.median(scores),
+            'sd': sd,
+            'se': se,
+            'ci_low': mean_value - ci_half,
+            'ci_high': mean_value + ci_half,
+            'positive_votes': positive,
+            'negative_votes': negative,
+            'tie_votes': ties,
+            'sign_test_p': p_value,
+            'holm_p': None,
+            'conclusion': '',
         }
         for score in range(-3, 4):
-            row[f"count_{score}"] = sum(1 for s in scores if int(round(s)) == score)
+            row[f'count_{score}'] = sum(1 for item in scores if int(round(item)) == score)
         rows.append(row)
-
-    adjusted = holm_adjust(p_values)
-    for row, p_adj in zip(rows, adjusted):
-        row["holm_p"] = p_adj
-        row["conclusion"] = pair_conclusion(row, alpha)
+    for row, adjusted in zip(rows, holm_adjust(p_values)):
+        row['holm_p'] = adjusted
+        row['conclusion'] = pair_conclusion(row, alpha)
     return rows, clean
 
 
-def pair_conclusion(row: dict, alpha: float) -> str:
-    left = row["sample_left"]
-    right = row["sample_right"]
-    avg = row["mean_cmos_left_minus_right"]
-    ci_low = row["ci_low"]
-    ci_high = row["ci_high"]
-    p_adj = row["holm_p"]
-
-    if row["n"] < 2:
-        return "样本量不足，仅作描述"
-
-    sign_ok = p_adj is not None and p_adj < alpha
-    ci_positive = ci_low > 0
-    ci_negative = ci_high < 0
-
-    if avg > 0 and sign_ok and ci_positive:
-        return f"{left} 显著优于 {right}"
-    if avg < 0 and sign_ok and ci_negative:
-        return f"{right} 显著优于 {left}"
-    if avg > 0:
-        return f"{left} 平均更优，但统计证据不足或不完全一致"
-    if avg < 0:
-        return f"{right} 平均更优，但统计证据不足或不完全一致"
-    return "两样本平均无差异"
-
-
-def solve_linear_system(matrix: List[List[float]], rhs: List[float]) -> List[float]:
+def solve_linear(matrix, rhs):
     n = len(rhs)
-    a = [row[:] + [rhs_i] for row, rhs_i in zip(matrix, rhs)]
-
+    a = [row[:] + [value] for row, value in zip(matrix, rhs)]
     for col in range(n):
-        pivot = max(range(col, n), key=lambda r: abs(a[r][col]))
+        pivot = max(range(col, n), key=lambda row: abs(a[row][col]))
         if abs(a[pivot][col]) < 1e-12:
-            raise ValueError("Linear system is singular; check sample graph connectivity.")
+            raise ValueError('Linear system is singular; check sample graph connectivity.')
         if pivot != col:
             a[col], a[pivot] = a[pivot], a[col]
-
-        pivot_value = a[col][col]
+        factor = a[col][col]
         for j in range(col, n + 1):
-            a[col][j] /= pivot_value
-
-        for r in range(n):
-            if r == col:
+            a[col][j] /= factor
+        for row in range(n):
+            if row == col:
                 continue
-            factor = a[r][col]
-            if abs(factor) < 1e-15:
-                continue
+            factor = a[row][col]
             for j in range(col, n + 1):
-                a[r][j] -= factor * a[col][j]
-
+                a[row][j] -= factor * a[col][j]
     return [a[i][n] for i in range(n)]
 
 
-def connected_components(samples: Sequence[str], edges: Iterable[Tuple[str, str]]) -> List[List[str]]:
-    adjacency: Dict[str, set] = {sample: set() for sample in samples}
-    for a, b in edges:
-        adjacency.setdefault(a, set()).add(b)
-        adjacency.setdefault(b, set()).add(a)
+def connected_components(samples, edges):
+    graph = {sample: set() for sample in samples}
+    for left, right in edges:
+        graph.setdefault(left, set()).add(right)
+        graph.setdefault(right, set()).add(left)
     seen = set()
-    components = []
-    for sample in sorted(adjacency):
+    parts = []
+    for sample in sorted(graph):
         if sample in seen:
             continue
         queue = deque([sample])
         seen.add(sample)
-        component = []
+        part = []
         while queue:
             current = queue.popleft()
-            component.append(current)
-            for nxt in sorted(adjacency[current]):
-                if nxt not in seen:
-                    seen.add(nxt)
-                    queue.append(nxt)
-        components.append(sorted(component))
-    return components
+            part.append(current)
+            for item in sorted(graph[current]):
+                if item not in seen:
+                    seen.add(item)
+                    queue.append(item)
+        parts.append(sorted(part))
+    return parts
 
 
-def score_samples(clean: Sequence[CanonicalObservation]) -> List[dict]:
-    samples = sorted({obs.left for obs in clean} | {obs.right for obs in clean})
+def score_samples(clean):
+    samples = sorted({row[1] for row in clean} | {row[2] for row in clean})
     if not samples:
         return []
-    edges = [(obs.left, obs.right) for obs in clean]
-    components = connected_components(samples, edges)
-    rows: List[dict] = []
-
-    observations_by_component = []
-    for component in components:
-        component_set = set(component)
-        component_obs = [
-            obs
-            for obs in clean
-            if obs.left in component_set and obs.right in component_set
-        ]
-        observations_by_component.append((component, component_obs))
-
-    for component_index, (component, component_obs) in enumerate(observations_by_component, start=1):
+    rows = []
+    for component_index, component in enumerate(connected_components(samples, [(row[1], row[2]) for row in clean]), start=1):
+        indexes = {sample: i for i, sample in enumerate(component)}
         k = len(component)
         if k == 1:
-            rows.append(
-                {
-                    "component": component_index,
-                    "rank": 1,
-                    "sample": component[0],
-                    "latent_ccr_score": 0.0,
-                    "n_observations": 0,
-                }
-            )
+            rows.append({'component': component_index, 'rank': 1, 'sample': component[0], 'latent_ccr_score': 0.0, 'n_observations': 0})
             continue
-
-        index = {sample: i for i, sample in enumerate(component)}
-        size = k + 1
-        matrix = [[0.0 for _ in range(size)] for _ in range(size)]
-        rhs = [0.0 for _ in range(size)]
-
-        for obs in component_obs:
-            i = index[obs.left]
-            j = index[obs.right]
-            score = obs.score
-            matrix[i][i] += 1.0
-            matrix[j][j] += 1.0
-            matrix[i][j] -= 1.0
-            matrix[j][i] -= 1.0
+        matrix = [[0.0 for _ in range(k + 1)] for _ in range(k + 1)]
+        rhs = [0.0 for _ in range(k + 1)]
+        counts = defaultdict(int)
+        for subject, left, right, score, row_number in clean:
+            if left not in indexes or right not in indexes:
+                continue
+            i = indexes[left]
+            j = indexes[right]
+            matrix[i][i] += 1
+            matrix[j][j] += 1
+            matrix[i][j] -= 1
+            matrix[j][i] -= 1
             rhs[i] += score
             rhs[j] -= score
-
+            counts[left] += 1
+            counts[right] += 1
         for i in range(k):
-            matrix[i][k] = 1.0
-            matrix[k][i] = 1.0
-        rhs[k] = 0.0
-
-        solution = solve_linear_system(matrix, rhs)[:k]
-        observation_count = defaultdict(int)
-        for obs in component_obs:
-            observation_count[obs.left] += 1
-            observation_count[obs.right] += 1
-
-        ordered = sorted(
-            ((sample, solution[index[sample]]) for sample in component),
-            key=lambda item: (-item[1], item[0]),
-        )
-        for rank, (sample, score) in enumerate(ordered, start=1):
-            rows.append(
-                {
-                    "component": component_index,
-                    "rank": rank,
-                    "sample": sample,
-                    "latent_ccr_score": score,
-                    "n_observations": observation_count[sample],
-                }
-            )
+            matrix[i][k] = 1
+            matrix[k][i] = 1
+        solution = solve_linear(matrix, rhs)[:k]
+        ordered = sorted(((sample, solution[indexes[sample]]) for sample in component), key=lambda item: (-item[1], item[0]))
+        for rank, item in enumerate(ordered, start=1):
+            sample, value = item
+            rows.append({'component': component_index, 'rank': rank, 'sample': sample, 'latent_ccr_score': value, 'n_observations': counts[sample]})
     return rows
 
 
-def write_csv(path: str, rows: Sequence[dict]) -> None:
+def write_csv(path, rows):
     if not rows:
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            f.write("")
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('')
         return
-    fieldnames = list(rows[0].keys())
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
 
 
-def fmt(value: object, digits: int = 3) -> str:
+def fmt(value):
     if value is None:
-        return ""
+        return ''
     if isinstance(value, bool):
-        return "是" if value else "否"
+        return '是' if value else '否'
     if isinstance(value, float):
         if math.isnan(value):
-            return ""
-        return f"{value:.{digits}f}"
+            return ''
+        return f'{value:.3f}'
     return str(value)
 
 
-def markdown_table(rows: Sequence[dict], columns: Sequence[Tuple[str, str]], limit: Optional[int] = None) -> str:
+def table(rows, columns):
     if not rows:
-        return "无数据\n"
-    selected = list(rows[:limit] if limit else rows)
-    header = "| " + " | ".join(title for _, title in columns) + " |"
-    sep = "| " + " | ".join("---" for _ in columns) + " |"
-    body = []
-    for row in selected:
-        body.append("| " + " | ".join(fmt(row.get(key)) for key, _ in columns) + " |")
-    if limit and len(rows) > limit:
-        body.append(f"| ... | 仅显示前 {limit} 行，共 {len(rows)} 行 |" + " |" * (len(columns) - 2))
-    return "\n".join([header, sep] + body) + "\n"
+        return '无数据'
+    lines = []
+    lines.append('| ' + ' | '.join(title for key, title in columns) + ' |')
+    lines.append('| ' + ' | '.join('---' for item in columns) + ' |')
+    for row in rows:
+        lines.append('| ' + ' | '.join(fmt(row.get(key)) for key, title in columns) + ' |')
+    return chr(10).join(lines)
 
 
-def build_report(
-    args: argparse.Namespace,
-    observations: Sequence[Observation],
-    reliability_rows: Sequence[dict],
-    circular_rows: Sequence[dict],
-    pair_rows: Sequence[dict],
-    sample_rows: Sequence[dict],
-    clean: Sequence[CanonicalObservation],
-    unreliable_subjects: set,
-) -> str:
-    subjects = sorted({obs.subject for obs in observations})
-    samples = sorted({obs.sample_a for obs in observations} | {obs.sample_b for obs in observations})
-    raw_pairs = {
-        tuple(sorted((obs.sample_a, obs.sample_b)))
-        for obs in observations
-    }
-    retained_subjects = sorted({obs.subject for obs in clean})
-    excluded_text = ", ".join(sorted(unreliable_subjects)) if unreliable_subjects else "无"
-    kept_note = "是，仍纳入最终统计" if args.keep_unreliable else "否，已从最终统计中剔除"
-
-    significant_pairs = [
-        row
-        for row in pair_rows
-        if row["holm_p"] is not None
-        and row["holm_p"] < args.alpha
-        and (row["ci_low"] > 0 or row["ci_high"] < 0)
+def build_report(args, rows, reliability, circular, pair_rows, sample_rows, clean, unreliable):
+    subjects = sorted({row[0] for row in rows})
+    samples = sorted({row[1] for row in rows} | {row[2] for row in rows})
+    pairs = {tuple(sorted((row[1], row[2]))) for row in rows}
+    significant = [
+        row for row in pair_rows
+        if row['holm_p'] is not None and row['holm_p'] < args.alpha and (row['ci_low'] > 0 or row['ci_high'] < 0)
     ]
-    top_rows = [row for row in sample_rows if row["rank"] == 1]
-    top_text = ", ".join(
-        f"{row['sample']} (component {row['component']}, score={fmt(row['latent_ccr_score'])})"
-        for row in top_rows
-    ) or "无"
-
+    top = [row for row in sample_rows if row['rank'] == 1]
+    top_parts = []
+    for row in top:
+        sample = row.get('sample')
+        component = row.get('component')
+        score = fmt(row.get('latent_ccr_score'))
+        top_parts.append(f'{sample} (component {component}, score={score})')
+    top_text = ', '.join(top_parts) or '无'
     lines = [
-        "# CCR 主观听音实验统计处理报告",
-        "",
-        "## 1. 输入与评分约定",
-        "",
-        f"- 输入文件：`{os.path.abspath(args.input_csv)}`",
-        f"- 输入模式：`{args.mode}`",
-        "- CCR 评分范围：-3..3；正值表示前述分析方向中的第一个样本优于第二个样本。",
-        "- 0 分按“无明确偏好/大致相同”处理，不参与循环三元组方向判定。",
-        f"- 原始评分条数：{len(observations)}",
-        f"- 受试者数 N：{len(subjects)}",
-        f"- 样本数：{len(samples)}",
-        f"- 配对样本数 M：{len(raw_pairs)}",
-        "",
-        "CCR 标尺：3 Much Better, 2 Better, 1 Slightly Better, 0 About the Same, "
-        "-1 Slightly Worse, -2 Worse, -3 Much Worse。",
-        "",
-        "## 2. 数据预处理",
-        "",
-        "- 检查受试者、样本名与评分列是否为空。",
-        "- 检查评分是否落在 [-3, 3]。",
-        "- 将所有配对统一到字典序方向 `(sample_left, sample_right)`；若原始方向相反，则评分取负。",
-        "- `presentation` 模式把评分解释为第二个样本相对于第一个样本；`p800` 模式按参考/处理样本的播放顺序反向重编码。",
-        "",
-        "## 3. 循环三元组与受试者可靠性",
-        "",
-        "对每名受试者，将重复配对先取均值，再把绝对值不小于 "
-        f"{args.min_abs_preference:g} 的配对视为有方向偏好。若存在 A>B、B>C、C>A "
-        "或反向等价闭环，则记为一个循环三元组。",
-        "",
-        f"- 循环比例阈值：`circular_triads / testable_triads > {args.cycle_rate_threshold:g}`",
-        f"- 完全且无并列的成对比较设计中，Kendall 一致性阈值：`zeta < {args.zeta_threshold:g}`",
-        "- `zeta = 1 - T / Tmax`；T 为循环三元组数量，Tmax 为该样本数下最大可能循环三元组数量。",
-        f"- 判为不可靠的受试者：{excluded_text}",
-        f"- 不可靠受试者是否保留在最终统计：{kept_note}",
-        "",
-        markdown_table(
-            reliability_rows,
-            [
-                ("subject", "受试者"),
-                ("n_pairs_seen", "已评配对"),
-                ("testable_triads", "可检三元组"),
-                ("circular_triads", "循环数"),
-                ("cycle_rate", "循环比例"),
-                ("kendall_zeta_complete_decisive", "Kendall zeta"),
-                ("reliable", "可靠"),
-                ("rejection_reason", "原因"),
-            ],
-        ),
-        "",
-        "## 4. 有效数据统计",
-        "",
-        f"- 最终纳入受试者数：{len(retained_subjects)}",
-        f"- 最终纳入评分条数：{len(clean)}",
-        "",
-        "每个配对输出 CMOS 均值、标准差、标准误、正态近似置信区间、方向性符号检验，以及 Holm 多重比较校正后的 p 值。"
-        "由于 CCR 是有序分类评分，均值/置信区间用于工程解释，符号检验作为方向性稳健检验。",
-        "",
-        markdown_table(
-            pair_rows,
-            [
-                ("sample_left", "样本 L"),
-                ("sample_right", "样本 R"),
-                ("n", "n"),
-                ("mean_cmos_left_minus_right", "CMOS L-R"),
-                ("ci_low", "CI低"),
-                ("ci_high", "CI高"),
-                ("positive_votes", "L胜"),
-                ("negative_votes", "R胜"),
-                ("tie_votes", "同等"),
-                ("holm_p", "Holm p"),
-                ("conclusion", "结论"),
-            ],
-        ),
-        "",
-        "## 5. 样本综合排序",
-        "",
-        "综合排序采用最小二乘成对比较尺度：拟合 `score(sample_i) - score(sample_j) ~= CCR(i,j)`，"
-        "并在每个连通分量内令样本分数和为 0。因此分数只适合同一连通分量内比较。",
-        "",
-        markdown_table(
-            sample_rows,
-            [
-                ("component", "分量"),
-                ("rank", "排名"),
-                ("sample", "样本"),
-                ("latent_ccr_score", "综合CCR分"),
-                ("n_observations", "相关评分数"),
-            ],
-        ),
-        "",
-        "## 6. 主观评测结论",
-        "",
-        f"- 综合排序第一的样本：{top_text}",
-        f"- Holm 校正后达到显著方向差异的配对数：{len(significant_pairs)} / {len(pair_rows)}",
+        '# CCR 主观听音实验统计处理报告',
+        '',
+        '## 1. 输入与评分约定',
+        '',
+        f'- 输入文件：`{os.path.abspath(args.input_csv)}`',
+        f'- 输入模式：`{args.mode}`',
+        '- CCR 评分范围：-3..3；正值表示 sample_a 优于 sample_b。',
+        '- 0 分按无明确偏好处理，不参与循环三元组方向判定。',
+        f'- 原始评分条数：{len(rows)}',
+        f'- 受试者数 N：{len(subjects)}',
+        f'- 样本数：{len(samples)}',
+        f'- 配对样本数 M：{len(pairs)}',
+        '',
+        '## 2. 数据预处理',
+        '',
+        '- 检查受试者、样本名与评分列是否为空。',
+        '- 检查评分是否落在 [-3, 3]。',
+        '- 将所有配对统一到字典序方向；若原始方向相反，则评分取负。',
+        f'- 最多支持样本数：{args.max_samples}。',
+        '',
+        '## 3. 循环三元组与受试者可靠性',
+        '',
+        f'- 循环比例阈值：`circular_triads / testable_triads > {args.cycle_rate_threshold:g}`',
+        f'- Kendall 一致性阈值：`zeta < {args.zeta_threshold:g}`',
+        f'- 判为不可靠的受试者：{unreliable_text(unreliable)}',
+        '',
+        table(reliability, [
+            ('subject', '受试者'),
+            ('n_pairs_seen', '已评配对'),
+            ('testable_triads', '可检三元组'),
+            ('circular_triads', '循环数'),
+            ('cycle_rate', '循环比例'),
+            ('kendall_zeta_complete_decisive', 'Kendall zeta'),
+            ('reliable', '可靠'),
+            ('rejection_reason', '原因'),
+        ]),
+        '',
+        '## 4. 有效数据统计',
+        '',
+        f'- 最终纳入受试者数：{len(sorted({row[0] for row in clean}))}',
+        f'- 最终纳入评分条数：{len(clean)}',
+        '',
+        table(pair_rows, [
+            ('sample_left', '样本 L'),
+            ('sample_right', '样本 R'),
+            ('n', 'n'),
+            ('mean_cmos_left_minus_right', 'CMOS L-R'),
+            ('ci_low', 'CI低'),
+            ('ci_high', 'CI高'),
+            ('positive_votes', 'L胜'),
+            ('negative_votes', 'R胜'),
+            ('tie_votes', '同等'),
+            ('holm_p', 'Holm p'),
+            ('conclusion', '结论'),
+        ]),
+        '',
+        '## 5. 样本综合排序',
+        '',
+        table(sample_rows, [
+            ('component', '分量'),
+            ('rank', '排名'),
+            ('sample', '样本'),
+            ('latent_ccr_score', '综合CCR分'),
+            ('n_observations', '相关评分数'),
+        ]),
+        '',
+        '## 6. 主观评测结论',
+        '',
+        f'- 综合排序第一的样本：{top_text}',
+        f'- Holm 校正后达到显著方向差异的配对数：{len(significant)} / {len(pair_rows)}',
     ]
-
-    if significant_pairs:
-        lines.append("- 显著配对结论：")
-        for row in significant_pairs:
-            lines.append(
-                f"  - {row['sample_left']} vs {row['sample_right']}: "
-                f"{row['conclusion']} "
-                f"(CMOS={fmt(row['mean_cmos_left_minus_right'])}, "
-                f"95% CI=[{fmt(row['ci_low'])}, {fmt(row['ci_high'])}], "
-                f"Holm p={fmt(row['holm_p'])})"
-            )
+    if significant:
+        lines.append('- 显著配对结论：')
+        for row in significant:
+            left = row.get('sample_left')
+            right = row.get('sample_right')
+            conclusion = row.get('conclusion')
+            lines.append(f'  - {left} vs {right}: {conclusion}')
     else:
-        lines.append("- 未发现 Holm 校正后同时满足方向性符号检验和均值置信区间的显著配对差异。")
-
-    if circular_rows:
-        lines.extend(
-            [
-                "",
-                "## 7. 循环三元组明细",
-                "",
-                markdown_table(
-                    circular_rows,
-                    [
-                        ("subject", "受试者"),
-                        ("sample_1", "样本1"),
-                        ("sample_2", "样本2"),
-                        ("sample_3", "样本3"),
-                        ("relation_1", "关系1"),
-                        ("relation_2", "关系2"),
-                        ("relation_3", "关系3"),
-                    ],
-                    limit=50,
-                ),
-            ]
-        )
-
-    lines.extend(
-        [
-            "",
-            "## 8. 方法依据",
-            "",
-            "- [ITU-T P.800](https://www.itu.int/rec/T-REC-P.800-199608-I) Annex E：CCR 采用 -3..3 七级比较标尺，输出 CMOS；随机播放顺序时需把处理样本先播放的试次取反后再统计。",
-            "- [Kendall 与 Babington Smith, 1940](https://doi.org/10.1093/biomet/31.3-4.324) 成对比较一致性：用循环三元组数量 T 以及 Kendall consistency zeta 评估单个评价者内部一致性。",
-            "- [Sensory Evaluation of Sound](https://www.routledge.com/Sensory-Evaluation-of-Sound/Zacharov/p/book/9780367656744) 总结了听音/声品质感官评估方法及单变量、多变量统计分析实践；CCR 均值适合作为工程汇总指标，但评分本质上是有序分类数据，因此结论同时报告非参数方向性检验。",
-            "",
-        ]
-    )
-    return "\n".join(lines)
+        lines.append('- 未发现 Holm 校正后同时满足方向性符号检验和均值置信区间的显著配对差异。')
+    if circular:
+        lines.extend([
+            '',
+            '## 7. 循环三元组明细',
+            '',
+            table(circular, [
+                ('subject', '受试者'),
+                ('sample_1', '样本1'),
+                ('sample_2', '样本2'),
+                ('sample_3', '样本3'),
+                ('relation_1', '关系1'),
+                ('relation_2', '关系2'),
+                ('relation_3', '关系3'),
+            ]),
+        ])
+    lines.extend([
+        '',
+        '## 8. 方法依据',
+        '',
+        '- ITU-T P.800 Annex E：CCR 采用 -3..3 七级比较标尺，输出 CMOS。',
+        '- Kendall 与 Babington Smith 成对比较一致性：用循环三元组数量和 zeta 评估评价者内部一致性。',
+        '- CCR 评分属于有序分类数据，因此同时报告均值 CMOS 和方向性符号检验。',
+    ])
+    return chr(10).join(lines)
 
 
-def cleaned_score_rows(clean: Sequence[CanonicalObservation]) -> List[dict]:
+def cleaned_rows(clean):
     return [
-        {
-            "subject": obs.subject,
-            "sample_left": obs.left,
-            "sample_right": obs.right,
-            "score_left_minus_right": obs.score,
-            "raw_row": obs.raw_row,
-        }
-        for obs in clean
+        {'subject': subject, 'sample_left': left, 'sample_right': right, 'score_left_minus_right': score, 'raw_row': row_number}
+        for subject, left, right, score, row_number in clean
     ]
 
 
-def main() -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8")
+def unreliable_text(unreliable):
+    return ', '.join(sorted(unreliable)) if unreliable else '无'
 
+
+def main():
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
     args = parse_args()
     try:
-        observations = read_observations(args)
-        canonical = [canonicalize(obs) for obs in observations]
-        reliability_rows, circular_rows, unreliable_subjects = analyze_subject_reliability(
-            observations,
+        if args.make_template:
+            samples = parse_sample_names(args.template_samples)
+            create_template(args.make_template, args.template_subjects, samples, args.template_fill)
+            row_count = args.template_subjects * comb(len(samples), 2)
+            print(f'Created template: {os.path.abspath(args.make_template)}')
+            sample_text = ', '.join(samples)
+            print(f'Subjects: {args.template_subjects}; samples: {sample_text}; rows: {row_count}')
+            return 0
+        if not args.input_csv:
+            raise ValueError('Please provide input_csv, or use --make-template PATH.')
+        rows = read_observations(args)
+        canonical = [canonicalize(row) for row in rows]
+        reliability, circular, unreliable = analyze_reliability(
+            rows,
             canonical,
             args.min_abs_preference,
             args.cycle_rate_threshold,
             args.zeta_threshold,
         )
-        pair_rows, clean = summarize_pairs(
-            canonical,
-            unreliable_subjects,
-            args.keep_unreliable,
-            args.alpha,
-        )
+        pair_rows, clean = summarize_pairs(canonical, unreliable, args.keep_unreliable, args.alpha)
         sample_rows = score_samples(clean)
-
         os.makedirs(args.out_dir, exist_ok=True)
-        write_csv(os.path.join(args.out_dir, "subject_reliability.csv"), reliability_rows)
-        write_csv(os.path.join(args.out_dir, "circular_triads.csv"), circular_rows)
-        write_csv(os.path.join(args.out_dir, "pair_summary.csv"), pair_rows)
-        write_csv(os.path.join(args.out_dir, "sample_scores.csv"), sample_rows)
-        write_csv(os.path.join(args.out_dir, "cleaned_scores.csv"), cleaned_score_rows(clean))
-
-        report = build_report(
-            args,
-            observations,
-            reliability_rows,
-            circular_rows,
-            pair_rows,
-            sample_rows,
-            clean,
-            unreliable_subjects,
-        )
-        report_path = os.path.join(args.out_dir, "processing_report.md")
-        with open(report_path, "w", encoding="utf-8") as f:
+        write_csv(os.path.join(args.out_dir, 'subject_reliability.csv'), reliability)
+        write_csv(os.path.join(args.out_dir, 'circular_triads.csv'), circular)
+        write_csv(os.path.join(args.out_dir, 'pair_summary.csv'), pair_rows)
+        write_csv(os.path.join(args.out_dir, 'sample_scores.csv'), sample_rows)
+        write_csv(os.path.join(args.out_dir, 'cleaned_scores.csv'), cleaned_rows(clean))
+        report = build_report(args, rows, reliability, circular, pair_rows, sample_rows, clean, unreliable)
+        report_path = os.path.join(args.out_dir, 'processing_report.md')
+        with open(report_path, 'w', encoding='utf-8') as f:
             f.write(report)
-
         print(report)
-        print(f"\nOutput directory: {os.path.abspath(args.out_dir)}")
+        print('')
+        print(f'Output directory: {os.path.abspath(args.out_dir)}')
         return 0
     except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(f'ERROR: {exc}', file=sys.stderr)
         return 2
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())
