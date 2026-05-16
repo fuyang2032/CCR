@@ -1,0 +1,4 @@
+component,rank,sample,latent_ccr_score,n_observations
+1,1,A,0.7777777777777778,6
+1,2,B,0.0,6
+1,3,C,-0.7777777777777778,6
