@@ -1,0 +1,11 @@
+subject,n_samples_seen,n_pairs_seen,possible_pairs,decisive_pairs,possible_triads,testable_triads,circular_triads,cycle_rate,kendall_tmax_complete,kendall_zeta_complete_decisive,reliable,rejection_reason
+S01,4,6,6,6,4,4,0,0.0,2,1.0,True,
+S02,4,6,6,6,4,4,0,0.0,2,1.0,True,
+S03,4,6,6,6,4,4,0,0.0,2,1.0,True,
+S04,4,6,6,6,4,4,0,0.0,2,1.0,True,
+S05,4,6,6,6,4,4,0,0.0,2,1.0,True,
+S06,4,6,6,6,4,4,1,0.25,2,0.5,False,zeta<0.75
+S07,4,6,6,6,4,4,1,0.25,2,0.5,False,zeta<0.75
+S08,4,6,6,6,4,4,2,0.5,2,0.0,False,cycle_rate>0.25;zeta<0.75
+S09,4,6,6,6,4,4,2,0.5,2,0.0,False,cycle_rate>0.25;zeta<0.75
+S10,4,6,6,6,4,4,1,0.25,2,0.5,False,zeta<0.75
