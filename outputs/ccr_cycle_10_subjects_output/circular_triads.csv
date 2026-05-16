@@ -1,0 +1,8 @@
+subject,sample_1,sample_2,sample_3,relation_1,relation_2,relation_3
+S06,A,B,C,A>B,B>C,C>A
+S07,B,C,D,B>C,C>D,D>B
+S08,A,B,C,B>A,C>B,A>C
+S08,B,C,D,C>B,D>C,B>D
+S09,A,B,C,A>B,B>C,C>A
+S09,B,C,D,B>C,C>D,D>B
+S10,B,C,D,C>B,D>C,B>D
