@@ -43,6 +43,49 @@ python ccr_analysis.py data.csv --out-dir ccr_output
 - `sample_scores.csv`：基于最小二乘成对比较尺度的综合排序
 - `cleaned_scores.csv`：剔除不可靠受试者后的统一方向评分
 
+## 推荐输入模板
+
+仓库提供了一个可直接编辑的 5 样本模板：
+
+```bash
+python ccr_analysis.py ccr_input_template_5_samples.csv --out-dir ccr_output
+```
+
+模板格式仍然是当前脚本的长表格式：
+
+```csv
+subject,sample_a,sample_b,rating
+S01,A,B,0
+S01,A,C,0
+S01,A,D,0
+S01,A,E,0
+S01,B,C,0
+S01,B,D,0
+S01,B,E,0
+S01,C,D,0
+S01,C,E,0
+S01,D,E,0
+```
+
+填写规则：
+
+- `subject`：受试者编号，例如 `S01`, `S02`, `P001`。
+- `sample_a`, `sample_b`：被比较的两个样本。正值表示 `sample_a` 优于 `sample_b`。
+- `rating`：CCR 原始评分，只能填写 `-3, -2, -1, 0, 1, 2, 3`。
+- 5 个样本时，每名受试者需要 10 行：`AB, AC, AD, AE, BC, BD, BE, CD, CE, DE`。
+- 4 个样本时，每名受试者保留 6 行：`AB, AC, AD, BC, BD, CD`，删除所有包含 `E` 的行。
+- 3 个样本时，每名受试者保留 3 行：`AB, AC, BC`。
+- 增加受试者：复制一个完整受试者块，并把 `subject` 改成新编号。
+- 删除受试者：删除该受试者对应的所有配对行。
+
+也可以用脚本生成新模板：
+
+```bash
+python ccr_analysis.py --make-template my_ccr_input.csv --template-subjects 12 --template-samples A,B,C,D
+```
+
+本脚本默认最多接受 5 个待评测样本；如果输入 CSV 中出现超过 5 个不同样本名，会报错提醒。
+
 ## 循环三元组阈值
 
 脚本默认把以下情况判为受试者评价不可靠：
@@ -92,19 +135,6 @@ python ccr_analysis.py data.csv --mode p800
 ```
 
 脚本会把结果统一重编码为“处理样本相对参考样本”的 CMOS。
-
-## 测试样例
-
-仓库包含两个测试集：
-
-- `examples/ccr_example.csv`：3 个样本的小型循环三元组示例。
-- `examples/ccr_cycle_10_subjects.csv`：10 个受试者、A/B/C/D 四个样本的完整成对比较数据，包含多个循环三元组。
-
-复现实验输出：
-
-```bash
-python ccr_analysis.py examples/ccr_cycle_10_subjects.csv --out-dir outputs/ccr_cycle_10_subjects_output
-```
 
 ## 方法说明
 
